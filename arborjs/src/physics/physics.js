@@ -4,7 +4,7 @@
 // the particle system itself. either run inline or in a worker (see worker.js)
 //
 
-  var Physics = function(dt, stiffness, repulsion, friction, updateFn, integrator){
+  var Physics = function(dt, stiffness, repulsion, friction, updateFn){
     var bhTree = BarnesHutTree() // for computing particle repulsion
     var active = {particles:{}, springs:{}}
     var free = {particles:{}}
@@ -17,7 +17,6 @@
     var SPEED_LIMIT = 1000 // the max particle velocity per tick
     
     var that = {
-      integrator:['verlet','euler'].indexOf(integrator)>=0 ? integrator : 'verlet',
       stiffness:(stiffness!==undefined) ? stiffness : 1000,
       repulsion:(repulsion!==undefined)? repulsion : 600,
       friction:(friction!==undefined)? friction : .3,
@@ -30,14 +29,14 @@
       },
 
       modifyPhysics:function(param){
-        $.each(['stiffness','repulsion','friction','gravity','dt','precision', 'integrator'], function(i, p){
+        $.each(['stiffness','repulsion','friction','gravity','dt','precision'], function(i, p){
           if (param[p]!==undefined){
             if (p=='precision'){
               that.theta = 1-param[p]
               return
             }
             that[p] = param[p]
-
+             
             if (p=='stiffness'){
               var stiff=param[p]
               $.each(active.springs, function(id, spring){
@@ -130,20 +129,10 @@
         return _epoch
       },
 
+
       tick:function(){
         that.tendParticles()
-        if (that.integrator=='euler'){
-          that.updateForces()
-          that.updateVelocity(that.dt)
-          that.updatePosition(that.dt)
-        }else{
-          // default to verlet
-          that.updateForces();
-          that.cacheForces();           // snapshot f(t)
-          that.updatePosition(that.dt); // update position to x(t + 1)
-          that.updateForces();          // calculate f(t+1)
-          that.updateVelocity(that.dt); // update using f(t) and f(t+1) 
-        }
+        that.eulerIntegrator(that.dt)
         that.tock()
       },
 
@@ -179,8 +168,8 @@
       },
       
       
-      // Physics stuff      
-      updateForces:function() {
+      // Physics stuff
+      eulerIntegrator:function(dt){
         if (that.repulsion>0){
           if (that.theta>0) that.applyBarnesHutRepulsion()
           else that.applyBruteForceRepulsion()
@@ -188,15 +177,10 @@
         if (that.stiffness>0) that.applySprings()
         that.applyCenterDrift()
         if (that.gravity) that.applyCenterGravity()
+        that.updateVelocity(dt)
+        that.updatePosition(dt)
       },
-      
-      cacheForces:function() {
-        // keep a snapshot of the current forces for the verlet integrator
-        $.each(active.particles, function(id, point) {
-           point._F = point.f;
-        });
-      },
-      
+
       applyBruteForceRepulsion:function(){
         $.each(active.particles, function(id1, point1){
           $.each(active.particles, function(id2, point2){
@@ -221,6 +205,11 @@
       
       applyBarnesHutRepulsion:function(){
         if (!_bounds.topleft || !_bounds.bottomright) return
+        var nParticles = 0;
+         for (var particle in active.particles)
+            nParticles++;
+         if (nParticles < 2) return
+         
         var bottomright = new Point(_bounds.bottomright)
         var topleft = new Point(_bounds.topleft)
 
@@ -264,7 +253,7 @@
           numParticles++
         });
 
-        if (numParticles==0) return
+        if (numParticles < 2) return
         
         var correction = centroid.divide(-numParticles)
         $.each(active.particles, function(id, point) {
@@ -282,7 +271,6 @@
       
       updateVelocity:function(timestep){
         // translate forces to a new velocity for this particle
-        var sum=0, max=0, n = 0;
         $.each(active.particles, function(id, point) {
           if (point.fixed){
              point.v = new Point(0,0)
@@ -290,43 +278,32 @@
              return
           }
 
-          if (that.integrator=='euler'){
-            point.v = point.v.add(point.f.multiply(timestep)).multiply(1-that.friction);
-          }else{
-            point.v = point.v.add(point.f.add(point._F.divide(point._m)).multiply(timestep*0.5)).multiply(1-that.friction);
-          }
+          var was = point.v.magnitude()
+          point.v = point.v.add(point.f.multiply(timestep)).multiply(1-that.friction);
           point.f.x = point.f.y = 0
 
           var speed = point.v.magnitude()          
           if (speed>SPEED_LIMIT) point.v = point.v.divide(speed*speed)
+        });
+      },
 
+      updatePosition:function(timestep){
+        // translate velocity to a position delta
+        var sum=0, max=0, n = 0;
+        var bottomright = null
+        var topleft = null
+
+        $.each(active.particles, function(i, point) {
+          // move the node to its new position
+          point.p = point.p.add(point.v.multiply(timestep));
+          
+          // keep stats to report in systemEnergy
           var speed = point.v.magnitude();
           var e = speed*speed
           sum += e
           max = Math.max(e,max)
           n++
-        });
-        _energy = {sum:sum, max:max, mean:sum/n, n:n}
-        
-      },
 
-      updatePosition:function(timestep){
-        // translate velocity to a position delta
-        var bottomright = null
-        var topleft = null        
-        
-        $.each(active.particles, function(i, point) {
-
-          // move the node to its new position
-          if (that.integrator=='euler'){
-            point.p = point.p.add(point.v.multiply(timestep));
-          }else{
-            //this should follow the equation
-            //x(t+1) = x(t) + v(t) * timestep + 1/2 * timestep^2 * a(t)
-            var accel = point.f.multiply(0.5 * timestep * timestep).divide(point.m);
-            point.p = point.p.add(point.v.multiply(timestep)).add(accel);
-          }
-          
           if (!bottomright){
             bottomright = new Point(point.p.x, point.p.y)
             topleft = new Point(point.p.x, point.p.y)
@@ -337,11 +314,13 @@
           if (pt.x===null || pt.y===null) return
           if (pt.x > bottomright.x) bottomright.x = pt.x;
           if (pt.y > bottomright.y) bottomright.y = pt.y;          
-          if (pt.x < topleft.x)     topleft.x = pt.x;
-          if (pt.y < topleft.y)     topleft.y = pt.y;
+          if   (pt.x < topleft.x)   topleft.x = pt.x;
+          if   (pt.y < topleft.y)   topleft.y = pt.y;
         });
         
-        _bounds = {topleft:topleft||new Point(-1,-1), bottomright:bottomright||new Point(1,1)}
+        _energy = {sum:sum, max:max, mean:sum/n, n:n}
+        if (n > 1)
+          _bounds = {topleft:topleft||new Point(-1,-1), bottomright:bottomright||new Point(1,1)}
       },
 
       systemEnergy:function(timestep){
