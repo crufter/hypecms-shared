@@ -17,5 +17,9 @@
 }
 
 .current_page {
+	background: #289228;
+}
+
+.current_page:hover {
 	background: green;
 }
